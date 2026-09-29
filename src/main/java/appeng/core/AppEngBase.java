@@ -92,6 +92,7 @@ import appeng.recipes.AERecipeSerializers;
 import appeng.recipes.AERecipeTypes;
 import appeng.server.AECommand;
 import appeng.server.services.ChunkLoadingService;
+import appeng.server.services.compass.ServerCompassService;
 import appeng.server.testworld.GameTestPlotAdapter;
 import appeng.sounds.AppEngSounds;
 import appeng.spatial.SpatialStorageChunkGenerator;
@@ -263,6 +264,7 @@ public abstract class AppEngBase implements AppEng {
 
     private void serverStopped(final ServerStoppedEvent event) {
         TickHandler.instance().shutdown();
+        ServerCompassService.clearCache();
     }
 
     public void registerCreativeTabs(Registry<CreativeModeTab> registry) {

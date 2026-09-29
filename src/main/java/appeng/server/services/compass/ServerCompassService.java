@@ -22,12 +22,12 @@ import java.util.ArrayList;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
 
 import org.jetbrains.annotations.Nullable;
 
@@ -35,8 +35,10 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.chunk.ChunkAccess;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
@@ -53,24 +55,34 @@ public final class ServerCompassService {
     private static final int MAX_RANGE = 174;
     private static final int CHUNK_SIZE = 16;
 
-    private record Query(ServerLevel level, ChunkPos chunk) {
+    /**
+     * Keyed by dimension rather than {@link ServerLevel} so the cache never keeps a level (and its chunks) alive after
+     * it has been unloaded.
+     */
+    private record Query(ResourceKey<Level> dimension, ChunkPos chunk) {
     }
 
     // We use this basic cache to prevent client-side spamming, although the client can request arbitrary
     // chunk positions and range, if malicious.
-    private static final LoadingCache<Query, Optional<BlockPos>> CLOSEST_METEORITE_CACHE = CacheBuilder.newBuilder()
+    private static final Cache<Query, Optional<BlockPos>> CLOSEST_METEORITE_CACHE = CacheBuilder.newBuilder()
             .maximumSize(100)
-            .weakKeys()
             .expireAfterWrite(5, TimeUnit.SECONDS)
-            .build(new CacheLoader<>() {
-                @Override
-                public Optional<BlockPos> load(ServerCompassService.Query query) {
-                    return Optional.ofNullable(findClosestMeteoritePos(query.level, query.chunk));
-                }
-            });
+            .build();
 
     public static Optional<BlockPos> getClosestMeteorite(ServerLevel level, ChunkPos chunkPos) {
-        return CLOSEST_METEORITE_CACHE.getUnchecked(new Query(level, chunkPos));
+        try {
+            return CLOSEST_METEORITE_CACHE.get(new Query(level.dimension(), chunkPos),
+                    () -> Optional.ofNullable(findClosestMeteoritePos(level, chunkPos)));
+        } catch (ExecutionException e) {
+            throw new RuntimeException(e.getCause());
+        }
+    }
+
+    /**
+     * Drops all cached results, e.g. when the server stops, so a new world never sees results from the previous one.
+     */
+    public static void clearCache() {
+        CLOSEST_METEORITE_CACHE.invalidateAll();
     }
 
     @Nullable
@@ -178,7 +190,8 @@ public final class ServerCompassService {
         for (var i = 0; i < level.getSectionsCount(); i++) {
             updateArea(compassRegion, chunk, i);
         }
-        CLOSEST_METEORITE_CACHE.invalidate(new Query(level, chunk.getPos()));
+        // A change in one chunk can change the closest meteorite for any nearby query
+        CLOSEST_METEORITE_CACHE.invalidateAll();
     }
 
     /**
@@ -188,7 +201,8 @@ public final class ServerCompassService {
         ChunkAccess chunk = level.getChunk(pos);
         var compassRegion = CompassRegion.get(level, chunk.getPos());
         updateArea(compassRegion, chunk, level.getSectionIndex(pos.getY()));
-        CLOSEST_METEORITE_CACHE.invalidate(new Query(level, chunk.getPos()));
+        // A change in one chunk can change the closest meteorite for any nearby query
+        CLOSEST_METEORITE_CACHE.invalidateAll();
     }
 
     public static void rebuild(ServerLevel level, ChunkPos center, CommandSourceStack source) {
